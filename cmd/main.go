@@ -19,31 +19,35 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 )
 
+type config struct {
+	kubeconfig *string
+	filename   *string
+	namespace  string
+}
+
 func main() {
 
-	namespace := "default3"
+	var c config
+	c.initConfig()
 
-	var kubeconfig *string
-	var filename *string
-	if dir, _ := os.Getwd(); dir != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(dir, "../kubeconfig.yml"), "(optional) absolute path to the kubeconfig file")
-		filename = flag.String("filename", filepath.Join(dir, "../deployment.yaml"), "")
-		fmt.Println(kubeconfig)
-	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
-	}
-	flag.Parse()
-
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	// SET CONFIG...
+	// in-cluster config
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		panic(err.Error())
+		fmt.Println(err.Error())
+
+		// use the current context in kubeconfig
+		config, err = clientcmd.BuildConfigFromFlags("", *c.kubeconfig)
+		if err != nil {
+			panic(err.Error())
+		}
 	}
 
 	// create the clientset
@@ -57,17 +61,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	err = createNamespace(clientset, namespace)
+	err = c.createNamespace(clientset)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	applyDeployment(clientset, dynamicConfig, filename, namespace)
+	c.applyDeployment(clientset, dynamicConfig)
 
 }
 
-func createNamespace(clientset *kubernetes.Clientset, namespace string) error {
-	nsSpec := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+func (c *config) createNamespace(clientset *kubernetes.Clientset) error {
+	nsSpec := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: c.namespace}}
 
 	_, err := clientset.CoreV1().Namespaces().Create(context.Background(), nsSpec, metav1.CreateOptions{})
 
@@ -78,8 +82,8 @@ func createNamespace(clientset *kubernetes.Clientset, namespace string) error {
 	return nil
 }
 
-func applyDeployment(clientset *kubernetes.Clientset, dynamicConfig dynamic.Interface, filename *string, namespace string) {
-	deployment, err := ioutil.ReadFile(*filename)
+func (c *config) applyDeployment(clientset *kubernetes.Clientset, dynamicConfig dynamic.Interface) {
+	deployment, err := ioutil.ReadFile(*c.filename)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -115,7 +119,13 @@ func applyDeployment(clientset *kubernetes.Clientset, dynamicConfig dynamic.Inte
 		var dri dynamic.ResourceInterface
 		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
 			if unstructuredObj.GetNamespace() == "" {
-				unstructuredObj.SetNamespace(namespace)
+				unstructuredObj.SetNamespace(c.namespace)
+			}
+			//set unique host
+			if unstructuredObj.GetKind() == "APIRule" {
+				if err := unstructured.SetNestedField(unstructuredObj.Object, "nginx-"+c.namespace, "spec", "service", "host"); err != nil {
+					panic(err)
+				}
 			}
 			dri = dynamicConfig.Resource(mapping.Resource).Namespace(unstructuredObj.GetNamespace())
 		} else {
@@ -130,4 +140,20 @@ func applyDeployment(clientset *kubernetes.Clientset, dynamicConfig dynamic.Inte
 	if err != io.EOF {
 		log.Fatal("eof ", err)
 	}
+}
+
+//set the config values to be used in the request
+func (c *config) initConfig() {
+
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Panic("could not get directory path")
+	}
+
+	c.kubeconfig = flag.String("kubeconfig", filepath.Join(dir, "./kubeconfig.yml"), "")
+	c.filename = flag.String("filename", filepath.Join(dir, "./deployment.yaml"), "")
+	flag.StringVar(&c.namespace, "namespace", "", "the namespace to create and deploy to")
+
+	flag.Parse()
+
 }
